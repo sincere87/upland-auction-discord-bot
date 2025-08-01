@@ -33,9 +33,59 @@ AUCTION_CHANNEL_IDS = [
     1309896571692912651, 1332469120897122454, 1352104013654528120,
     1377038520061001769
 ]
+@bot.tree.command(name="notify_outbid", description="Notify you via DM if you are outbid in this auction channel")
+async def notify_outbid(interaction: discord.Interaction, auction_id: str):
+    user_id = interaction.user.id
+    channel_id = interaction.channel_id
+    # Store notification request for this user and auction
+    if not hasattr(bot, "outbid_notifications"):
+        bot.outbid_notifications = {}
+    bot.outbid_notifications[(auction_id, channel_id, user_id)] = True
+    await interaction.response.send_message(
+        f"You will be notified via DM if you are outbid in auction '{auction_id}' in this channel.",
+        ephemeral=True
+    )
 
-bot.watched_auctions = {}
+# Example outbid detection logic (add inside your on_message event)
+# This is a placeholder; you must adapt it to your auction message format.
+async def check_outbid(message):
+    # Example: Detect if a user is outbid (replace with your actual logic)
+    # Suppose auction messages are like "UserX bid 100 on auction123"
+    for (auction_id, channel_id, user_id) in getattr(bot, "outbid_notifications", {}):
+        if message.channel.id == channel_id and auction_id in message.content:
+            # Extract bidder from message (customize this parsing)
+            if "bid" in message.content.lower():
+                bidder = str(message.author.id)
+                if bidder != str(user_id):
+                    user = await bot.fetch_user(user_id)
+                    if user:
+                        await user.send(
+                            f"You have been outbid in auction '{auction_id}' in <#{channel_id}>!"
+                        )
 
+# Add this line at the end of your on_message event:
+    await check_outbid(message)
+@bot.tree.command(name="set_reminder", description="Set a DM reminder for an auction listing")
+async def set_reminder(interaction: discord.Interaction, auction_id: str, minutes: int):
+    user_id = interaction.user.id
+    job_id = f"{user_id}_{auction_id}_{minutes}_{datetime.datetime.utcnow().timestamp()}"
+    run_time = datetime.datetime.utcnow() + datetime.timedelta(minutes=minutes)
+    bot.reminders[job_id] = {"auction_id": auction_id, "user_id": user_id}
+    bot.scheduler.add_job(
+        send_reminder_dm,
+        trigger='date',
+        run_date=run_time,
+        args=[user_id, auction_id],
+        id=job_id
+    )
+    await interaction.response.send_message(
+        f"Reminder set for auction '{auction_id}' in {minutes} minutes. You will receive a DM.", ephemeral=True
+    )
+
+async def send_reminder_dm(user_id, auction_id):
+    user = await bot.fetch_user(user_id)
+    if user:
+        await user.send(f"Reminder: Auction '{auction_id}' is coming to a close soon!")
 @bot.tree.command(name="watch_auction", description="Start monitoring an auction in this channel")
 async def watch_auction(interaction: discord.Interaction, auction_id: str):
     channel_id = interaction.channel_id
