@@ -1,10 +1,10 @@
-import discord
-from discord.ext import commands
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import openai
 import os
 import datetime
 from dotenv import load_dotenv
+import discord
+from discord.ext import commands
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from openai import AsyncOpenAI
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -12,6 +12,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not TOKEN or not OPENAI_API_KEY:
     raise EnvironmentError("DISCORD_TOKEN and OPENAI_API_KEY must be set in your .env file.")
+
+aclient = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -21,7 +23,6 @@ class AuctionBot(commands.Bot):
         super().__init__(command_prefix='/', intents=intents)
         self.scheduler = AsyncIOScheduler()
         self.reminders = {}
-        openai.api_key = OPENAI_API_KEY
 
     async def setup_hook(self):
         await self.tree.sync()
@@ -62,10 +63,8 @@ async def auction_summary(interaction: discord.Interaction, auction_text: str):
     await interaction.response.defer(thinking=True)
     try:
         prompt = f"Summarize and validate this upland NFT auction post: {auction_text}"
-        response = await openai.ChatCompletion.acreate(
-            model="gpt-4",
-            messages=[{"role": "user", "content": prompt}]
-        )
+        response = await aclient.chat.completions.create(model="gpt-4",
+        messages=[{"role": "user", "content": prompt}])
         summary = response['choices'][0]['message']['content']
         await interaction.followup.send(summary)
     except Exception as e:
@@ -75,10 +74,8 @@ async def auction_summary(interaction: discord.Interaction, auction_text: str):
 async def ask_gpt(interaction: discord.Interaction, prompt: str):
     await interaction.response.defer(thinking=True)
     try:
-        response = await openai.ChatCompletion.acreate(
-            model="gpt-4",
-            messages=[{"role": "user", "content": prompt}]
-        )
+        response = await aclient.chat.completions.create(model="gpt-4",
+        messages=[{"role": "user", "content": prompt}])
         answer = response['choices'][0]['message']['content']
         await interaction.followup.send(answer)
     except Exception as e:
@@ -106,10 +103,8 @@ def parse_auction_message(content):
 
 async def get_ai_summary(auction_info):
     prompt = f"Summarize and validate this upland NFT auction post: {auction_info['content']}"
-    response = await openai.ChatCompletion.acreate(
-        model="gpt-4",
-        messages=[{"role": "user", "content": prompt}]
-    )
+    response = await aclient.chat.completions.create(model="gpt-4",
+    messages=[{"role": "user", "content": prompt}])
     return response['choices'][0]['message']['content']
 
 if __name__ == "__main__":
