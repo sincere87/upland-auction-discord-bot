@@ -4,16 +4,12 @@ from dotenv import load_dotenv
 import discord
 from discord.ext import commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from openai import AsyncOpenAI
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-if not TOKEN or not OPENAI_API_KEY:
-    raise EnvironmentError("DISCORD_TOKEN and OPENAI_API_KEY must be set in your .env file.")
-
-aclient = AsyncOpenAI(api_key=OPENAI_API_KEY)
+if not TOKEN:
+    raise EnvironmentError("DISCORD_TOKEN must be set in your .env file.")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -38,80 +34,62 @@ AUCTION_CHANNEL_IDS = [
     1377038520061001769
 ]
 
-@bot.event
-async def on_ready():
-    print(f'Logged in as {bot.user} (ID: {bot.user.id})')
+bot.watched_auctions = {}
 
-@bot.tree.command(name="set_reminder", description="Set a reminder for an auction asset")
-async def set_reminder(interaction: discord.Interaction, asset: str, minutes: int):
+@bot.tree.command(name="watch_auction", description="Start monitoring an auction in this channel")
+async def watch_auction(interaction: discord.Interaction, auction_id: str):
+    channel_id = interaction.channel_id
     user_id = interaction.user.id
-    job_id = f"{user_id}_{asset}_{minutes}_{datetime.datetime.utcnow().timestamp()}"
-    run_time = datetime.datetime.utcnow() + datetime.timedelta(minutes=minutes)
-    bot.reminders[job_id] = (asset, user_id)
-    bot.scheduler.add_job(
-        send_reminder_dm,
-        trigger='date',
-        run_date=run_time,
-        args=[user_id, asset],
-        id=job_id
-    )
+    if channel_id not in AUCTION_CHANNEL_IDS:
+        await interaction.response.send_message(
+            "This channel is not monitored for auctions.", ephemeral=True
+        )
+        return
+    bot.watched_auctions[auction_id] = {
+        "channel_id": channel_id,
+        "user_id": user_id,
+        "active": True,
+        "messages": []
+    }
     await interaction.response.send_message(
-        f"Reminder set for '{asset}' in {minutes} minutes. You will receive a DM.", ephemeral=True
+        f"Bot is now watching auction '{auction_id}' in this channel.", ephemeral=True
     )
 
-async def send_reminder_dm(user_id, asset):
-    user = await bot.fetch_user(user_id)
-    if user:
-        await user.send(f"Reminder: Auction for '{asset}' is ending soon!")
-
-@bot.tree.command(name="auction_summary", description="Summarize and validate an Upland auction post using AI")
-async def auction_summary(interaction: discord.Interaction, auction_text: str):
-    await interaction.response.defer(thinking=True)
-    try:
-        prompt = f"Summarize and validate this upland NFT auction post: {auction_text}"
-        response = await aclient.chat.completions.create(model="gpt-4",
-        messages=[{"role": "user", "content": prompt}])
-        summary = response['choices'][0]['message']['content']
-        await interaction.followup.send(summary)
-    except Exception as e:
-        await interaction.followup.send(f"Error: {e}")
-
-@bot.tree.command(name="ask_gpt", description="Ask GPT-4 any question (general purpose, not auction-specific)")
-async def ask_gpt(interaction: discord.Interaction, prompt: str):
-    await interaction.response.defer(thinking=True)
-    try:
-        response = await aclient.chat.completions.create(model="gpt-4",
-        messages=[{"role": "user", "content": prompt}])
-        answer = response['choices'][0]['message']['content']
-        await interaction.followup.send(answer)
-    except Exception as e:
-        await interaction.followup.send(f"Error: {e}")
-
-# ...existing code...
-async def send_reminder(channel_id, asset, mention):
-    channel = bot.get_channel(channel_id)
-    if channel:
-        await channel.send(f"{mention}, auction for '{asset}' is ending soon!")
+@bot.tree.command(name="conclude_auction", description="Stop monitoring an auction and show summary")
+async def conclude_auction(interaction: discord.Interaction, auction_id: str):
+    auction = bot.watched_auctions.get(auction_id)
+    if not auction or not auction["active"]:
+        await interaction.response.send_message(
+            f"Auction '{auction_id}' is not being watched or already concluded.", ephemeral=True
+        )
+        return
+    auction["active"] = False
+    msg_count = len(auction["messages"])
+    await interaction.response.send_message(
+        f"Auction '{auction_id}' concluded. {msg_count} messages tracked during auction.",
+        ephemeral=True
+    )
+    # Optionally, you can process or summarize the tracked messages here
 
 @bot.event
 async def on_message(message):
-    if message.channel.id in AUCTION_CHANNEL_IDS and not message.author.bot:
-        auction_info = parse_auction_message(message.content)
-        if auction_info:
-            ai_response = await get_ai_summary(auction_info)
-            await message.channel.send(ai_response)
     await bot.process_commands(message)
+    # Track messages for watched auctions
+    for auction_id, auction in bot.watched_auctions.items():
+        if auction["active"] and message.channel.id == auction["channel_id"]:
+            auction["messages"].append({
+                "author": str(message.author),
+                "content": message.content,
+                "timestamp": str(message.created_at)
+            })
+    # Optionally, detect auction posts in monitored channels
+    if message.channel.id in AUCTION_CHANNEL_IDS and not message.author.bot:
+        if "auction" in message.content.lower() and "asset" in message.content.lower():
+            await message.channel.send("Auction post detected!")
 
-def parse_auction_message(content):
-    if "auction" in content.lower() and "asset" in content.lower():
-        return {"content": content}
-    return None
-
-async def get_ai_summary(auction_info):
-    prompt = f"Summarize and validate this upland NFT auction post: {auction_info['content']}"
-    response = await aclient.chat.completions.create(model="gpt-4",
-    messages=[{"role": "user", "content": prompt}])
-    return response['choices'][0]['message']['content']
+@bot.event
+async def on_ready():
+    print(f'Logged in as {bot.user} (ID: {bot.user.id})')
 
 if __name__ == "__main__":
     bot.run(TOKEN)
