@@ -47,16 +47,22 @@ async def set_reminder(interaction: discord.Interaction, asset: str, minutes: in
     user_id = interaction.user.id
     job_id = f"{user_id}_{asset}_{minutes}_{datetime.datetime.utcnow().timestamp()}"
     run_time = datetime.datetime.utcnow() + datetime.timedelta(minutes=minutes)
-    bot.reminders[job_id] = (asset, interaction.channel_id)
+    bot.reminders[job_id] = (asset, user_id)
     bot.scheduler.add_job(
-        send_reminder,
+        send_reminder_dm,
         trigger='date',
         run_date=run_time,
-        args=[interaction.channel_id, asset, interaction.user.mention],
+        args=[user_id, asset],
         id=job_id
     )
-    await interaction.response.send_message(f"Reminder set for '{asset}' in {minutes} minutes.", ephemeral=True)
-# ...existing code...
+    await interaction.response.send_message(
+        f"Reminder set for '{asset}' in {minutes} minutes. You will receive a DM.", ephemeral=True
+    )
+
+async def send_reminder_dm(user_id, asset):
+    user = await bot.fetch_user(user_id)
+    if user:
+        await user.send(f"Reminder: Auction for '{asset}' is ending soon!")
 
 @bot.tree.command(name="auction_summary", description="Summarize and validate an Upland auction post using AI")
 async def auction_summary(interaction: discord.Interaction, auction_text: str):
