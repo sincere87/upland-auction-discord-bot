@@ -55,7 +55,36 @@ async def set_reminder(interaction: discord.Interaction, asset: str, minutes: in
         id=job_id
     )
     await interaction.response.send_message(f"Reminder set for '{asset}' in {minutes} minutes.", ephemeral=True)
+# ...existing code...
 
+@bot.tree.command(name="auction_summary", description="Summarize and validate an Upland auction post using AI")
+async def auction_summary(interaction: discord.Interaction, auction_text: str):
+    await interaction.response.defer(thinking=True)
+    try:
+        prompt = f"Summarize and validate this upland NFT auction post: {auction_text}"
+        response = await openai.ChatCompletion.acreate(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        summary = response['choices'][0]['message']['content']
+        await interaction.followup.send(summary)
+    except Exception as e:
+        await interaction.followup.send(f"Error: {e}")
+
+@bot.tree.command(name="ask_gpt", description="Ask GPT-4 any question (general purpose, not auction-specific)")
+async def ask_gpt(interaction: discord.Interaction, prompt: str):
+    await interaction.response.defer(thinking=True)
+    try:
+        response = await openai.ChatCompletion.acreate(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        answer = response['choices'][0]['message']['content']
+        await interaction.followup.send(answer)
+    except Exception as e:
+        await interaction.followup.send(f"Error: {e}")
+
+# ...existing code...
 async def send_reminder(channel_id, asset, mention):
     channel = bot.get_channel(channel_id)
     if channel:
