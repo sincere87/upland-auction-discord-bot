@@ -1,5 +1,4 @@
 discord.py
 apscheduler
-openai
 python-dotenv
 flask
