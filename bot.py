@@ -2,15 +2,18 @@ import os
 import datetime
 from dotenv import load_dotenv
 import discord
+from discord import app_commands
 from discord.ext import commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from collections import defaultdict
 
+# Load environment variables
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
-
 if not TOKEN:
     raise EnvironmentError("DISCORD_TOKEN must be set in your .env file.")
 
+# Constants
 AUCTION_CHANNEL_IDS = [
     1200435807920591008, 1206719103772139630, 1206719174643023923,
     1213557612826595459, 1394009977378574508, 1394010162108432545,
@@ -19,16 +22,21 @@ AUCTION_CHANNEL_IDS = [
     1377038520061001769
 ]
 
+# Intents
 intents = discord.Intents.default()
 intents.message_content = True
 
+# Track auctions and watchers
+current_auctions = defaultdict(dict)
+outbid_watchers = defaultdict(dict)
+
+# Bot class
 class AuctionBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix='/', intents=intents)
         self.scheduler = AsyncIOScheduler()
         self.reminders = {}
         self.watched_auctions = {}
-        self.outbid_notifications = {}
 
     async def setup_hook(self):
         await self.tree.sync()
@@ -36,13 +44,35 @@ class AuctionBot(commands.Bot):
 
 bot = AuctionBot()
 
-@bot.tree.command(name="notify_outbid", description="Notify you via DM if you are outbid in this auction channel")
+# Slash Commands
+@bot.tree.command(name="notify_outbid", description="Get notified via DM if you're outbid.")
+@app_commands.describe(auction_id="The ID of the auction to watch.")
 async def notify_outbid(interaction: discord.Interaction, auction_id: str):
     user_id = interaction.user.id
-    channel_id = interaction.channel_id
-    bot.outbid_notifications[(auction_id, channel_id, user_id)] = True
+    outbid_watchers[auction_id][user_id] = True
     await interaction.response.send_message(
-        f"You will be notified via DM if you are outbid in auction '{auction_id}' in this channel.",
+        f"You'll be notified via DM if you're outbid in auction `{auction_id}`.",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="cb", description="Confirm a bid and notify any outbid watchers.")
+@app_commands.describe(bidder="User placing the bid", amount="Bid amount", auction_id="Auction ID")
+async def cb(interaction: discord.Interaction, bidder: discord.Member, amount: int, auction_id: str):
+    prev = current_auctions[auction_id].get("highest_bidder")
+    current_auctions[auction_id] = {"highest_bidder": bidder, "amount": amount}
+
+    if prev and prev.id in outbid_watchers[auction_id]:
+        try:
+            await prev.send(
+                f"You’ve been outbid in auction `{auction_id}`.\n"
+                f"New high bid: {amount:,} by {bidder.display_name}."
+            )
+        except discord.Forbidden:
+            print(f"⚠️ Couldn't DM {prev.display_name}")
+        del outbid_watchers[auction_id][prev.id]
+
+    await interaction.response.send_message(
+        f"✅ {bidder.display_name} confirmed at {amount:,} for `{auction_id}`.",
         ephemeral=True
     )
 
@@ -103,6 +133,7 @@ async def conclude_auction(interaction: discord.Interaction, auction_id: str):
         ephemeral=True
     )
 
+# Events
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user} (ID: {bot.user.id})')
@@ -111,10 +142,6 @@ async def on_ready():
 async def on_message(message):
     await bot.process_commands(message)
 
-    # Check for outbid notifications
-    await check_outbid(message)
-
-    # Track auction messages
     for auction_id, auction in bot.watched_auctions.items():
         if auction["active"] and message.channel.id == auction["channel_id"]:
             auction["messages"].append({
@@ -123,24 +150,13 @@ async def on_message(message):
                 "timestamp": str(message.created_at)
             })
 
-    # Detect new auction posts
     if message.channel.id in AUCTION_CHANNEL_IDS and not message.author.bot:
         if "auction" in message.content.lower() and "asset" in message.content.lower():
             await message.channel.send("Auction post detected!")
 
-async def check_outbid(message):
-    for (auction_id, channel_id, user_id) in bot.outbid_notifications:
-        if message.channel.id == channel_id and auction_id in message.content:
-            if "bid" in message.content.lower():
-                bidder = str(message.author.id)
-                if bidder != str(user_id):
-                    user = await bot.fetch_user(user_id)
-                    if user:
-                        await user.send(
-                            f"You have been outbid in auction '{auction_id}' in <#{channel_id}>!"
-                        )
-
+# Keep-alive
 if __name__ == "__main__":
     from keep_alive import keep_alive
-    keep_alive()  # Start the web server to keep the bot alive
+    keep_alive()
     bot.run(TOKEN)
+
