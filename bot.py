@@ -141,4 +141,6 @@ async def check_outbid(message):
                         )
 
 if __name__ == "__main__":
+    from keep_alive import keep_alive
+    keep_alive()  # Start the web server to keep the bot alive
     bot.run(TOKEN)
