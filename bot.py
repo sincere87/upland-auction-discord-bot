@@ -95,7 +95,11 @@ async def watch_auction(interaction: discord.Interaction, auction_id: str):
             "This channel is not monitored for auctions.", ephemeral=True
         )
         return
-    bot.watched_auctions[auction_id] = {
+    bot.watched_auctions[1200435807920591008, 1206719103772139630, 1206719174643023923,
+    1213557612826595459, 1394009977378574508, 1394010162108432545,
+    1231738039496085535, 1254867397366517841, 1259960721152807005,
+    1309896571692912651, 1332469120897122454, 1352104013654528120,
+    1377038520061001769] = {
         "channel_id": channel_id,
         "user_id": user_id,
         "active": True,
