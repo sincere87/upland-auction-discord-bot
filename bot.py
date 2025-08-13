@@ -36,7 +36,6 @@ class AuctionBot(commands.Bot):
         super().__init__(command_prefix='/', intents=intents)
         self.scheduler = AsyncIOScheduler()
         self.reminders = {}
-        self.watched_auctions = {}
 
     async def setup_hook(self):
         await self.tree.sync()
@@ -99,40 +98,6 @@ async def send_reminder_dm(user_id, auction_id):
     if user:
         await user.send(f"Reminder: Auction '{auction_id}' is coming to a close soon!")
 
-@bot.tree.command(name="watch_auction", description="Start monitoring an auction in this channel")
-async def watch_auction(interaction: discord.Interaction, auction_id: str):
-    channel_id = interaction.channel_id
-    user_id = interaction.user.id
-    if channel_id not in AUCTION_CHANNEL_IDS:
-        await interaction.response.send_message(
-            "This channel is not monitored for auctions.", ephemeral=True
-        )
-        return
-    bot.watched_auctions[auction_id] = {
-        "channel_id": channel_id,
-        "user_id": user_id,
-        "active": True,
-        "messages": []
-    }
-    await interaction.response.send_message(
-        f"Bot is now watching auction '{auction_id}' in this channel.", ephemeral=True
-    )
-
-@bot.tree.command(name="conclude_auction", description="Stop monitoring an auction and show summary")
-async def conclude_auction(interaction: discord.Interaction, auction_id: str):
-    auction = bot.watched_auctions.get(auction_id)
-    if not auction or not auction["active"]:
-        await interaction.response.send_message(
-            f"Auction '{auction_id}' is not being watched or already concluded.", ephemeral=True
-        )
-        return
-    auction["active"] = False
-    msg_count = len(auction["messages"])
-    await interaction.response.send_message(
-        f"Auction '{auction_id}' concluded. {msg_count} messages tracked during auction.",
-        ephemeral=True
-    )
-
 # Events
 @bot.event
 async def on_ready():
@@ -142,13 +107,7 @@ async def on_ready():
 async def on_message(message):
     await bot.process_commands(message)
 
-    for auction_id, auction in bot.watched_auctions.items():
-        if auction["active"] and message.channel.id == auction["channel_id"]:
-            auction["messages"].append({
-                "author": str(message.author),
-                "content": message.content,
-                "timestamp": str(message.created_at)
-            })
+    # Removed watched_auctions logic because it's no longer used
 
     if message.channel.id in AUCTION_CHANNEL_IDS and not message.author.bot:
         if "auction" in message.content.lower() and "asset" in message.content.lower():
@@ -159,4 +118,5 @@ if __name__ == "__main__":
     from keep_alive import keep_alive
     keep_alive()
     bot.run(TOKEN)
+
 
