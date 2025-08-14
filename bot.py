@@ -1,5 +1,7 @@
 import os
 import datetime
+import re
+import pytz
 from dotenv import load_dotenv
 import discord
 from discord import app_commands
@@ -22,6 +24,14 @@ AUCTION_CHANNEL_IDS = [
     1377038520061001769
 ]
 
+# Role IDs (replace with actual ones from your server)
+ROLE_BIDDER_ID = 123456789012345678
+ROLE_COLLECTOR_ID = 223456789012345678
+ROLE_SNIPER_ID = 323456789012345678
+
+# Regex to find <t:UNIX> timestamps
+TIMESTAMP_REGEX = re.compile(r"<t:(\d+)>")
+
 # Intents
 intents = discord.Intents.default()
 intents.message_content = True
@@ -29,6 +39,7 @@ intents.message_content = True
 # Track auctions and watchers
 current_auctions = defaultdict(dict)
 outbid_watchers = defaultdict(dict)
+scheduled_messages = set()
 
 # Bot class
 class AuctionBot(commands.Bot):
@@ -98,25 +109,83 @@ async def send_reminder_dm(user_id, auction_id):
     if user:
         await user.send(f"Reminder: Auction '{auction_id}' is coming to a close soon!")
 
+# Auction Alerts
+async def send_halfway_alert(channel_id, message_id):
+    channel = bot.get_channel(channel_id)
+    bidder_role = channel.guild.get_role(ROLE_BIDDER_ID)
+    collector_role = channel.guild.get_role(ROLE_COLLECTOR_ID)
+    original_message = await channel.fetch_message(message_id)
+    await channel.send(
+        f"⏳ {bidder_role.mention} {collector_role.mention} — This auction is at **halftime**!\n"
+        f"{original_message.jump_url}"
+    )
+
+async def send_one_hour_alert(channel_id, message_id):
+    channel = bot.get_channel(channel_id)
+    sniper_role = channel.guild.get_role(ROLE_SNIPER_ID)
+    original_message = await channel.fetch_message(message_id)
+    await channel.send(
+        f"🎯 {sniper_role.mention} — **1 hour remaining**! Final bids incoming!\n"
+        f"{original_message.jump_url}"
+    )
+
 # Events
 @bot.event
 async def on_ready():
-    print(f'Logged in as {bot.user} (ID: {bot.user.id})')
+    print(f'✅ Logged in as {bot.user} (ID: {bot.user.id})')
 
 @bot.event
 async def on_message(message):
     await bot.process_commands(message)
 
-    # Removed watched_auctions logic because it's no longer used
+    # Only watch new auction posts in designated channels
+    if message.channel.id not in AUCTION_CHANNEL_IDS or message.author.bot:
+        return
 
-    if message.channel.id in AUCTION_CHANNEL_IDS and not message.author.bot:
-        if "auction" in message.content.lower() and "asset" in message.content.lower():
-            await message.channel.send("Auction post detected!")
+    if message.id in scheduled_messages:
+        return
+
+    match = TIMESTAMP_REGEX.search(message.content)
+    if not match:
+        return
+
+    unix_time = int(match.group(1))
+    end_time = datetime.datetime.fromtimestamp(unix_time, tz=pytz.UTC)
+    now = datetime.datetime.now(pytz.UTC)
+
+    if end_time <= now + datetime.timedelta(hours=1):
+        return
+
+    time_remaining = end_time - now
+    halfway_time = now + time_remaining / 2
+    one_hour_before = end_time - datetime.timedelta(hours=1)
+
+    # Mark message as scheduled
+    scheduled_messages.add(message.id)
+
+    # Log scheduling to console
+    print(f"[Scheduled] Halftime alert for message {message.id} at {halfway_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    print(f"[Scheduled] 1-hour alert for message {message.id} at {one_hour_before.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+
+    # Schedule alerts
+    bot.scheduler.add_job(
+        send_halfway_alert,
+        "date",
+        run_date=halfway_time,
+        args=[message.channel.id, message.id]
+    )
+    bot.scheduler.add_job(
+        send_one_hour_alert,
+        "date",
+        run_date=one_hour_before,
+        args=[message.channel.id, message.id]
+    )
 
 # Keep-alive
 if __name__ == "__main__":
     from keep_alive import keep_alive
     keep_alive()
     bot.run(TOKEN)
+
 
 
