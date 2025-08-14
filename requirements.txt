@@ -2,3 +2,4 @@ discord.py
 apscheduler
 python-dotenv
 flask
+pytz
