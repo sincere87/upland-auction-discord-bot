@@ -112,8 +112,8 @@ async def send_reminder_dm(user_id, auction_id):
 # Auction Alerts
 async def send_halfway_alert(channel_id, message_id):
     channel = bot.get_channel(channel_id)
-    bidder_role = channel.guild.get_role(ROLE_BIDDER_ID)
-    collector_role = channel.guild.get_role(ROLE_COLLECTOR_ID)
+    bidder_role = channel.guild.get_role(1315016261293576345)
+    collector_role = channel.guild.get_role(1314988994580320266)
     original_message = await channel.fetch_message(message_id)
     await channel.send(
         f"⏳ {bidder_role.mention} {collector_role.mention} — This auction is at **halftime**!\n"
@@ -122,7 +122,7 @@ async def send_halfway_alert(channel_id, message_id):
 
 async def send_one_hour_alert(channel_id, message_id):
     channel = bot.get_channel(channel_id)
-    sniper_role = channel.guild.get_role(ROLE_SNIPER_ID)
+    sniper_role = channel.guild.get_role(1315017025764196483)
     original_message = await channel.fetch_message(message_id)
     await channel.send(
         f"🎯 {sniper_role.mention} — **1 hour remaining**! Final bids incoming!\n"
