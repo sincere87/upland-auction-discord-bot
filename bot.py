@@ -1,4 +1,4 @@
-import os
+import os 
 import datetime
 import re
 import pytz
@@ -54,7 +54,56 @@ class AuctionBot(commands.Bot):
 
 bot = AuctionBot()
 
+# ------------------------
+# Helper functions
+# ------------------------
+
+async def confirm_bid(bidder: discord.Member, amount: int, auction_id: str, channel: discord.TextChannel = None, interaction: discord.Interaction = None):
+    prev = current_auctions.get(auction_id, {}).get("highest_bidder")
+    current_auctions[auction_id] = {"highest_bidder": bidder, "amount": amount}
+
+    if prev and prev.id in outbid_watchers[auction_id]:
+        try:
+            await prev.send(
+                f"You’ve been outbid in auction `{auction_id}`.\n"
+                f"New high bid: {amount:,} by {bidder.display_name}."
+            )
+        except discord.Forbidden:
+            print(f"⚠️ Couldn't DM {prev.display_name}")
+        del outbid_watchers[auction_id][prev.id]
+
+    if interaction:
+        await interaction.response.send_message(
+            f"✅ {bidder.display_name} confirmed at {amount:,} for `{auction_id}`.",
+            ephemeral=True
+        )
+    elif channel:
+        await channel.send(
+            f"✅ {bidder.display_name} confirmed at {amount:,} for `{auction_id}`."
+        )
+
+
+def parse_amount(text: str) -> int:
+    """
+    Parse bid amounts inside free-form text.
+    Handles "5k", "I'll go 10k", "new bid 7,500", "$12", "12 upx", etc.
+    """
+    text = text.lower().replace(",", "").replace("upx", "").replace("$", "")
+
+    match = re.search(r"(\d+)(k)?", text)
+    if not match:
+        raise ValueError(f"Could not parse amount from: {text}")
+
+    amount = int(match.group(1))
+    if match.group(2) == "k":
+        amount *= 1000
+
+    return amount
+
+# ------------------------
 # Slash Commands
+# ------------------------
+
 @bot.tree.command(name="notify_outbid", description="Get notified via DM if you're outbid.")
 @app_commands.describe(auction_id="The ID of the auction to watch.")
 async def notify_outbid(interaction: discord.Interaction, auction_id: str):
@@ -68,30 +117,30 @@ async def notify_outbid(interaction: discord.Interaction, auction_id: str):
 @bot.tree.command(name="cb", description="Confirm a bid and notify any outbid watchers.")
 @app_commands.describe(bidder="User placing the bid", amount="Bid amount", auction_id="Auction ID")
 async def cb(interaction: discord.Interaction, bidder: discord.Member, amount: int, auction_id: str):
-    prev = current_auctions[auction_id].get("highest_bidder")
-    current_auctions[auction_id] = {"highest_bidder": bidder, "amount": amount}
-
-    if prev and prev.id in outbid_watchers[auction_id]:
-        try:
-            await prev.send(
-                f"You’ve been outbid in auction `{auction_id}`.\n"
-                f"New high bid: {amount:,} by {bidder.display_name}."
-            )
-        except discord.Forbidden:
-            print(f"⚠️ Couldn't DM {prev.display_name}")
-        del outbid_watchers[auction_id][prev.id]
-
-    await interaction.response.send_message(
-        f"✅ {bidder.display_name} confirmed at {amount:,} for `{auction_id}`.",
-        ephemeral=True
-    )
+    await confirm_bid(bidder, amount, auction_id, interaction=interaction)
 
 @bot.tree.command(name="set_reminder", description="Set a DM reminder for an auction listing")
-async def set_reminder(interaction: discord.Interaction, auction_id: str, minutes: int):
+async def set_reminder(
+    interaction: discord.Interaction,
+    auction_id: str,
+    hours: int = 0,
+    minutes: int = 0
+):
     user_id = interaction.user.id
-    job_id = f"{user_id}_{auction_id}_{minutes}_{datetime.datetime.utcnow().timestamp()}"
-    run_time = datetime.datetime.utcnow() + datetime.timedelta(minutes=minutes)
+
+    if hours == 0 and minutes == 0:
+        await interaction.response.send_message(
+            "⏳ Please provide at least hours or minutes for the reminder.",
+            ephemeral=True
+        )
+        return
+
+    total_delay = datetime.timedelta(hours=hours, minutes=minutes)
+    run_time = datetime.datetime.utcnow() + total_delay
+
+    job_id = f"{user_id}_{auction_id}_{hours}h{minutes}m_{datetime.datetime.utcnow().timestamp()}"
     bot.reminders[job_id] = {"auction_id": auction_id, "user_id": user_id}
+
     bot.scheduler.add_job(
         send_reminder_dm,
         trigger='date',
@@ -99,8 +148,9 @@ async def set_reminder(interaction: discord.Interaction, auction_id: str, minute
         args=[user_id, auction_id],
         id=job_id
     )
+
     await interaction.response.send_message(
-        f"Reminder set for auction '{auction_id}' in {minutes} minutes. You will receive a DM.",
+        f"✅ Reminder set for auction '{auction_id}' in {hours}h {minutes}m. You will receive a DM.",
         ephemeral=True
     )
 
@@ -109,7 +159,10 @@ async def send_reminder_dm(user_id, auction_id):
     if user:
         await user.send(f"Reminder: Auction '{auction_id}' is coming to a close soon!")
 
+# ------------------------
 # Auction Alerts
+# ------------------------
+
 async def send_halfway_alert(channel_id, message_id):
     channel = bot.get_channel(channel_id)
     bidder_role = channel.guild.get_role(1315016261293576345)
@@ -129,7 +182,10 @@ async def send_one_hour_alert(channel_id, message_id):
         f"{original_message.jump_url}"
     )
 
+# ------------------------
 # Events
+# ------------------------
+
 @bot.event
 async def on_ready():
     print(f'✅ Logged in as {bot.user} (ID: {bot.user.id})')
@@ -138,10 +194,8 @@ async def on_ready():
 async def on_message(message):
     await bot.process_commands(message)
 
-    # Only watch new auction posts in designated channels
     if message.channel.id not in AUCTION_CHANNEL_IDS or message.author.bot:
         return
-
     if message.id in scheduled_messages:
         return
 
@@ -160,32 +214,51 @@ async def on_message(message):
     halfway_time = now + time_remaining / 2
     one_hour_before = end_time - datetime.timedelta(hours=1)
 
-    # Mark message as scheduled
     scheduled_messages.add(message.id)
 
-    # Log scheduling to console
     print(f"[Scheduled] Halftime alert for message {message.id} at {halfway_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
     print(f"[Scheduled] 1-hour alert for message {message.id} at {one_hour_before.strftime('%Y-%m-%d %H:%M:%S %Z')}")
 
-    # Schedule alerts
-    bot.scheduler.add_job(
-        send_halfway_alert,
-        "date",
-        run_date=halfway_time,
-        args=[message.channel.id, message.id]
-    )
-    bot.scheduler.add_job(
-        send_one_hour_alert,
-        "date",
-        run_date=one_hour_before,
-        args=[message.channel.id, message.id]
-    )
+    bot.scheduler.add_job(send_halfway_alert, "date", run_date=halfway_time, args=[message.channel.id, message.id])
+    bot.scheduler.add_job(send_one_hour_alert, "date", run_date=one_hour_before, args=[message.channel.id, message.id])
 
+# ------------------------
+# Reaction Event: Confirm Bids
+# ------------------------
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    # Replace with your confirm emoji ID
+    if str(payload.emoji.id) != "1365117493919744122":
+        return
+    if payload.user_id == bot.user.id:
+        return
+
+    guild = bot.get_guild(payload.guild_id)
+    channel = guild.get_channel(payload.channel_id)
+    message = await channel.fetch_message(payload.message_id)
+
+    # Bidder = the author of the bid message
+    bidder = message.author
+
+    try:
+        amount = parse_amount(message.content)
+    except Exception:
+        await channel.send(f"⚠️ Couldn’t detect a valid bid in {bidder.mention}’s message.")
+        return
+
+    auction_id = str(channel.id)
+    await confirm_bid(bidder, amount, auction_id, channel=channel)
+
+# ------------------------
 # Keep-alive
+# ------------------------
+
 if __name__ == "__main__":
     from keep_alive import keep_alive
     keep_alive()
     bot.run(TOKEN)
+
 
 
 
