@@ -99,9 +99,10 @@ CREATE TABLE IF NOT EXISTS bids (
 );
 """)
 
-    db_exec(\"CREATE INDEX IF NOT EXISTS idx_bids_auction ON bids(auction_id);\")
-    db_exec(\"CREATE INDEX IF NOT EXISTS idx_bids_time ON bids(bid_time_utc);\")
-    db_exec(\"CREATE INDEX IF NOT EXISTS idx_auctions_status ON auctions(status);\")
+def setup_indexes():
+    db_exec("CREATE INDEX IF NOT EXISTS idx_bids_auction ON bids(auction_id);")
+    db_exec("CREATE INDEX IF NOT EXISTS idx_bids_time ON bids(bid_time_utc);")
+    db_exec("CREATE INDEX IF NOT EXISTS idx_auctions_status ON auctions(status);")
 
 # =========================
 # Utilities
