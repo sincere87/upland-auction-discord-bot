@@ -77,6 +77,15 @@ def init_db():
 SELECT * FROM users;
 """)
 db_exec("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    discord_id TEXT NOT NULL UNIQUE,
+    username TEXT,
+    joined_at TEXT DEFAULT (datetime('now'))
+);
+""")
+
+db_exec("""
 CREATE TABLE IF NOT EXISTS auctions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     auction_id TEXT NOT NULL UNIQUE,
