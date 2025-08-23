@@ -73,7 +73,9 @@ def db_all(query, params=()):
         return cur.fetchall()
 
 def init_db():
-    db_exec(\"\"\"\
+    db_exec("""
+SELECT * FROM users;
+""")
 CREATE TABLE IF NOT EXISTS auctions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     auction_id TEXT NOT NULL UNIQUE,
