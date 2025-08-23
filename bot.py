@@ -1,5 +1,4 @@
-# Fix indentation in the multi-line SQL strings by ensuring they are within a proper triple-quoted Python string.
-optimized_code = r"""import os
+"""import os
 import re
 import sqlite3
 import datetime as dt
@@ -436,4 +435,4 @@ if __name__ == '__main__':
     init_db()
     keep_alive()
     bot.run(TOKEN)
-"""
+
