@@ -437,7 +437,3 @@ if __name__ == '__main__':
     keep_alive()
     bot.run(TOKEN)
 """
-file_path = "/mnt/data/auction_bot_optimized.py"
-with open(file_path, "w", encoding="utf-8") as f:
-    f.write(optimized_code)
-file_path
