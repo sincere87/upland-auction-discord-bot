@@ -113,7 +113,7 @@ def iso_utc(dt_obj: dt.datetime) -> str:
     return dt_obj.astimezone(pytz.UTC).isoformat()
 
 def parse_amount(text: str) -> int:
-    text = text.lower().replace(\",\", \"\").replace(\"upx\", \"\").replace(\"$\", \"\")
+text = text.lower().replace(",", "").replace("upx", "").replace("$", "")
     m = re.search(r\"(\\d+)(k)?\", text)
     if not m:
         raise ValueError(\"no amount\")
