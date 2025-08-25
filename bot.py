@@ -23,6 +23,8 @@ if not TOKEN:
 DB_PATH = "auctions.db"
 UTC = pytz.UTC
 TIMESTAMP_REGEX = re.compile(r"<t:(\d+)>")
+
+# Channels where the bot will detect listings and accept bids
 AUCTION_CHANNEL_IDS = [
     1200435807920591008, 1206719103772139630, 1206719174643023923,
     1213557612826595459, 1394009977378574508, 1394010162108432545,
@@ -30,10 +32,14 @@ AUCTION_CHANNEL_IDS = [
     1309896571692912651, 1332469120897122454, 1352104013654528120,
     1377038520061001769
 ]
-CONFIRM_EMOJI_ID = "1365117493919744122"  # adjust if you change your emoji
+
+# Reaction used to confirm bids
+CONFIRM_EMOJI_ID = "1365117493919744122"  # replace if needed
+
+# Role mentions for alerts
 ROLE_BIDDER_ID = 1315016261293576345
 ROLE_COLLECTOR_ID = 1314988994580320266
-ROLE_SNIPER_ID = 1315017025764196483
+ROLE_SNIPER_ID   = 1315017025764196483
 
 # =========================
 # Discord Setup
@@ -48,6 +54,7 @@ intents.reactions = True
 # In-memory helpers
 outbid_watchers = defaultdict(dict)   # {auction_id: {user_id: True}}
 scheduled_messages = set()            # message_ids with alerts scheduled
+concluded_auctions = set()            # auction_ids concluded via command (no DB schema change)
 
 # =========================
 # Database Helpers
@@ -74,44 +81,27 @@ def db_all(query, params=()):
 
 def init_db():
     db_exec("""
-SELECT * FROM users;
-""")
-db_exec("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    discord_id TEXT NOT NULL UNIQUE,
-    username TEXT,
-    joined_at TEXT DEFAULT (datetime('now'))
-);
-""")
-
-db_exec("""
-CREATE TABLE IF NOT EXISTS auctions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    auction_id TEXT NOT NULL UNIQUE,
-    message_id TEXT,
-    channel_id TEXT,
-    end_time_utc TEXT,
-    status TEXT DEFAULT 'pending',
-    created_at_utc TEXT DEFAULT (datetime('now'))
-);
-""")
-
-db_exec("""
-CREATE TABLE IF NOT EXISTS bids (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    auction_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    amount INTEGER NOT NULL,
-    bid_time_utc TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (auction_id) REFERENCES auctions(auction_id)
-);
-""")
-
-def setup_indexes():
+    CREATE TABLE IF NOT EXISTS auctions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        auction_id TEXT NOT NULL UNIQUE,
+        message_id TEXT,
+        channel_id TEXT,
+        end_time_utc TEXT,
+        created_at_utc TEXT DEFAULT (datetime('now'))
+    );
+    """)
+    db_exec("""
+    CREATE TABLE IF NOT EXISTS bids (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        auction_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        amount INTEGER NOT NULL,
+        bid_time_utc TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (auction_id) REFERENCES auctions(auction_id)
+    );
+    """)
     db_exec("CREATE INDEX IF NOT EXISTS idx_bids_auction ON bids(auction_id);")
     db_exec("CREATE INDEX IF NOT EXISTS idx_bids_time ON bids(bid_time_utc);")
-    db_exec("CREATE INDEX IF NOT EXISTS idx_auctions_status ON auctions(status);")
 
 # =========================
 # Utilities
@@ -136,14 +126,11 @@ def upsert_pending(auction_id: str, message_id: str, channel_id: str, end_time_u
     existing = get_auction(auction_id)
     if not existing:
         db_exec(
-            "INSERT INTO auctions (auction_id, message_id, channel_id, end_time_utc, status) VALUES (?, ?, ?, ?, 'pending')",
+            "INSERT INTO auctions (auction_id, message_id, channel_id, end_time_utc) VALUES (?, ?, ?, ?)",
             (auction_id, message_id, channel_id, end_time_utc),
         )
     elif not existing["end_time_utc"]:
         db_exec("UPDATE auctions SET end_time_utc=? WHERE auction_id=?", (end_time_utc, auction_id))
-
-def set_status(auction_id: str, status: str):
-    db_exec("UPDATE auctions SET status=? WHERE auction_id=?", (status, auction_id))
 
 def record_bid(auction_id: str, user_id: int, amount: int, when: dt.datetime | None = None):
     when = when or dt.datetime.now(pytz.UTC)
@@ -173,22 +160,25 @@ def best_bid_before_end(auction_id: str):
 # Auction Manager (runtime cache)
 # =========================
 class AuctionManager:
-    """Caches active auctions per channel for fast lookups and consistent IDs."""
+    """Caches a single 'active' auction per channel for consistent lookups without DB schema changes."""
     def __init__(self):
-        self.active_by_channel: dict[str, str] = {}
+        self.active_by_channel: dict[str, str] = {}  # channel_id -> auction_id
 
-    def activate(self, channel_id: str | int, auction_id: str | int):
+    def activate(self, channel_id: int | str, auction_id: int | str):
         self.active_by_channel[str(channel_id)] = str(auction_id)
 
-    def deactivate(self, channel_id: str | int):
-        self.active_by_channel.pop(str(channel_id), None)
+    def deactivate_if_matches(self, channel_id: int | str, auction_id: int | str):
+        ch = str(channel_id)
+        if self.active_by_channel.get(ch) == str(auction_id):
+            self.active_by_channel.pop(ch, None)
 
-    def get_active_for_channel(self, channel_id: str | int) -> str | None:
+    def get_active_for_channel(self, channel_id: int | str) -> str | None:
         a = self.active_by_channel.get(str(channel_id))
         if a:
             return a
+        # Fallback: pick most recent auction listing for this channel (by created_at_utc)
         row = db_one(
-            "SELECT auction_id FROM auctions WHERE channel_id=? AND status='active' ORDER BY datetime(created_at_utc) DESC LIMIT 1",
+            "SELECT auction_id FROM auctions WHERE channel_id=? ORDER BY datetime(created_at_utc) DESC LIMIT 1",
             (str(channel_id),),
         )
         if row:
@@ -207,25 +197,25 @@ class AuctionBot(commands.Bot):
         self.scheduler = AsyncIOScheduler()
         self.reminders = {}
 
-async def setup_hook(self):
-    await self.tree.sync()
-    self.scheduler.start()
+    async def setup_hook(self):
+        await self.tree.sync()
+        self.scheduler.start()
 
 bot = AuctionBot()
+
 # =========================
 # Alerts
 # =========================
-ROLE_BIDDER_ID = 1315016261293576345
-ROLE_COLLECTOR_ID = 1314988994580320266
-ROLE_SNIPER_ID = 1315017025764196483
-
 async def send_halfway_alert(channel_id, message_id):
     channel = bot.get_channel(int(channel_id))
     if not channel:
         return
     bidder_role = channel.guild.get_role(ROLE_BIDDER_ID)
     collector_role = channel.guild.get_role(ROLE_COLLECTOR_ID)
-    msg = await channel.fetch_message(int(message_id))
+    try:
+        msg = await channel.fetch_message(int(message_id))
+    except Exception:
+        return
     await channel.send(
         f"⏳ {bidder_role.mention if bidder_role else ''} {collector_role.mention if collector_role else ''} — This auction is at **halftime**!\n{msg.jump_url}"
     )
@@ -235,7 +225,10 @@ async def send_one_hour_alert(channel_id, message_id):
     if not channel:
         return
     sniper_role = channel.guild.get_role(ROLE_SNIPER_ID)
-    msg = await channel.fetch_message(int(message_id))
+    try:
+        msg = await channel.fetch_message(int(message_id))
+    except Exception:
+        return
     await channel.send(
         f"🎯 {sniper_role.mention if sniper_role else ''} — **1 hour remaining**! Final bids incoming!\n{msg.jump_url}"
     )
@@ -250,6 +243,16 @@ async def confirm_bid(
     channel: discord.TextChannel | None = None,
     interaction: discord.Interaction | None = None
 ):
+    # Block bids if concluded via command
+    if auction_id in concluded_auctions:
+        text = f"⛔ Auction `{auction_id}` has been concluded. No further bids allowed."
+        if interaction and not interaction.response.is_done():
+            await interaction.response.send_message(text, ephemeral=True)
+        elif channel:
+            await channel.send(text)
+        return
+
+    # Validate auction existence
     auction = get_auction(auction_id)
     if not auction:
         text = f"⚠️ Auction `{auction_id}` is not registered. Use `/track_auction {auction_id}` to activate."
@@ -259,6 +262,7 @@ async def confirm_bid(
             await channel.send(text)
         return
 
+    # Enforce higher-than-current bid
     current = best_bid_now(auction_id)
     if current and amount <= current["amount"]:
         msg = f"⚠️ Bid must be higher than the current bid ({current['amount']:,})."
@@ -268,9 +272,11 @@ async def confirm_bid(
             await channel.send(msg)
         return
 
+    # Persist bid
     record_bid(auction_id, bidder.id, amount)
-    prev_bidder_id = current["user_id"] if current else None
 
+    # Notify outbid watchers
+    prev_bidder_id = current["user_id"] if current else None
     if prev_bidder_id and int(prev_bidder_id) in outbid_watchers[auction_id]:
         try:
             prev_user = await bot.fetch_user(int(prev_bidder_id))
@@ -281,6 +287,7 @@ async def confirm_bid(
             pass
         outbid_watchers[auction_id].pop(int(prev_bidder_id), None)
 
+    # Acknowledge
     ack = f"✅ {bidder.display_name} confirmed at {amount:,} for `{auction_id}`."
     if interaction and not interaction.response.is_done():
         await interaction.response.send_message(ack, ephemeral=True)
@@ -310,6 +317,7 @@ async def cb_cmd(
     amount: int,
     auction_id: str | None = None
 ):
+    # Use provided auction_id or fall back to the channel's active listing
     auction_id = auction_id or auction_mgr.get_active_for_channel(interaction.channel_id)
     if not auction_id:
         await interaction.response.send_message(
@@ -317,7 +325,7 @@ async def cb_cmd(
             ephemeral=True
         )
         return
-    await confirm_bid(bidder, amount, auction_id, interaction=interaction)
+    await confirm_bid(bidder, amount, str(auction_id), interaction=interaction)
 
 @bot.tree.command(name="set_reminder", description="DM reminder for an auction")
 async def set_reminder_cmd(
@@ -351,6 +359,8 @@ async def send_reminder_dm(user_id, auction_id):
 @bot.tree.command(name="track_auction", description="Activate a detected auction by message_id")
 @app_commands.describe(message_id="The message ID of the auction post (<t:UNIX> inside).")
 async def track_cmd(interaction: discord.Interaction, message_id: str):
+    # Validate channel
+    # Search all known auction channels for the message
     target_msg = None
     for ch_id in AUCTION_CHANNEL_IDS:
         ch = interaction.client.get_channel(ch_id)
@@ -376,10 +386,13 @@ async def track_cmd(interaction: discord.Interaction, message_id: str):
     unix_time = int(match.group(1))
     end_time = dt.datetime.fromtimestamp(unix_time, tz=pytz.UTC)
 
+    # Register / update
     upsert_pending(str(target_msg.id), str(target_msg.id), str(target_msg.channel.id), iso_utc(end_time))
-    set_status(str(target_msg.id), "active")
+
+    # Activate this listing for the channel
     auction_mgr.activate(target_msg.channel.id, target_msg.id)
 
+    # Schedule alerts if appropriate
     now = dt.datetime.now(pytz.UTC)
     if end_time > now + dt.timedelta(hours=1):
         scheduled_messages.add(target_msg.id)
@@ -419,9 +432,37 @@ async def auction_info_cmd(interaction: discord.Interaction, auction_id: str):
         return
     jump = f"https://discord.com/channels/{interaction.guild_id}/{a['channel_id']}/{a['message_id']}" if a["channel_id"] and a["message_id"] else ""
     await interaction.response.send_message(
-        f"🗂 **Auction** `{auction_id}`\n• Status: `{a['status']}`\n• Ends (UTC): `{a['end_time_utc']}`\n{jump}",
+        f"🗂 **Auction** `{auction_id}`\n• Ends (UTC): `{a['end_time_utc']}`\n{jump}",
         ephemeral=True
     )
+
+@bot.tree.command(name="conclude_auction", description="Mark an auction as concluded and announce with a custom message.")
+@app_commands.describe(
+    auction_id="The listing message ID for the auction.",
+    message="Custom message to announce."
+)
+async def conclude_auction_cmd(interaction: discord.Interaction, auction_id: str, message: str):
+    a = get_auction(auction_id)
+    if not a:
+        await interaction.response.send_message(f"❌ Auction `{auction_id}` not found.", ephemeral=True)
+        return
+
+    # Mark concluded in memory (no DB schema change)
+    concluded_auctions.add(auction_id)
+
+    # Deactivate as active for that channel if currently selected
+    if a["channel_id"]:
+        auction_mgr.deactivate_if_matches(a["channel_id"], auction_id)
+
+    # Acknowledge to the invoker
+    await interaction.response.send_message(f"✅ Auction `{auction_id}` has been concluded.", ephemeral=True)
+
+    # Announce in the auction channel
+    channel = bot.get_channel(int(a["channel_id"])) if a["channel_id"] else None
+    if channel:
+        # Try to include the original jump URL
+        jump_url = f"https://discord.com/channels/{interaction.guild_id}/{a['channel_id']}/{a['message_id']}" if a["message_id"] else ""
+        await channel.send(f"🏁 **Auction Concluded** — `{auction_id}`\n{message}\n{jump_url}")
 
 # =========================
 # Events
@@ -429,26 +470,43 @@ async def auction_info_cmd(interaction: discord.Interaction, auction_id: str):
 @bot.event
 async def on_ready():
     init_db()
+
+    # Preload "active" auctions for each AUCTION_CHANNEL_ID (latest listing per channel)
+    for ch_id in AUCTION_CHANNEL_IDS:
+        row = db_one(
+            "SELECT auction_id FROM auctions WHERE channel_id=? ORDER BY datetime(created_at_utc) DESC LIMIT 1",
+            (str(ch_id),),
+        )
+        if row:
+            auction_mgr.activate(ch_id, row["auction_id"])
+
     print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
 
 @bot.event
 async def on_message(message: discord.Message):
     await bot.process_commands(message)
-    if message.author.bot or message.channel.id not in AUCTION_CHANNEL_IDS or message.id in scheduled_messages:
+    if message.author.bot or message.id in scheduled_messages:
         return
 
+    if message.channel.id not in AUCTION_CHANNEL_IDS:
+        # Soft feedback so users understand why it's ignored
+        return
+
+    # Detect listings with <t:UNIX>
     m = TIMESTAMP_REGEX.search(message.content)
     if not m:
         return
 
     unix_time = int(m.group(1))
     end_time = dt.datetime.fromtimestamp(unix_time, tz=pytz.UTC)
+
     upsert_pending(str(message.id), str(message.id), str(message.channel.id), iso_utc(end_time))
 
     await message.channel.send(
         f"🛎 Potential auction detected for message `{message.id}` (ends <t:{unix_time}:R>). Confirm with `/track_auction {message.id}`."
     )
 
+    # Schedule alerts if more than an hour away
     now = dt.datetime.now(pytz.UTC)
     if end_time <= now + dt.timedelta(hours=1):
         return
@@ -460,13 +518,21 @@ async def on_message(message: discord.Message):
 
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    # Only the confirm emoji counts
     if str(getattr(payload.emoji, "id", None)) != CONFIRM_EMOJI_ID:
         return
     if payload.user_id == bot.user.id:
         return
+
     guild = bot.get_guild(payload.guild_id)
     channel = guild.get_channel(payload.channel_id)
-    message = await channel.fetch_message(payload.message_id)
+    if not channel or channel.id not in AUCTION_CHANNEL_IDS:
+        return
+
+    try:
+        message = await channel.fetch_message(payload.message_id)
+    except Exception:
+        return
 
     bidder = message.author
     try:
@@ -475,6 +541,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         await channel.send(f"⚠️ Couldn’t detect a valid bid in {bidder.mention}’s message.")
         return
 
+    # Use the active auction for this channel
     auction_id = auction_mgr.get_active_for_channel(channel.id)
     if not auction_id:
         await channel.send("⚠️ No active auction found for this channel. Please use `/track_auction <message_id>` first.")
@@ -486,7 +553,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 # Run
 # =========================
 if __name__ == '__main__':
-    from keep_alive import keep_alive
+    from keep_alive import keep_alive  # if you use a keep_alive webserver (Repl/Render)
     init_db()
     keep_alive()
     bot.run(TOKEN)
